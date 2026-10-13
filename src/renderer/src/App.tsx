@@ -1,5 +1,4 @@
-
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import './assets/main.css'
 
 type BrowserTab = {
@@ -34,7 +33,80 @@ function App() {
     'Your browser workspace, ready to explore.'
   )
 
+  const workspaceRef = useRef<HTMLDivElement>(null)
+  const contentSlotRef = useRef<HTMLDivElement>(null)
+
+  const [canGoBack, setCanGoBack] = useState(false)
+  const [canGoForward, setCanGoForward] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+
   const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs[0]
+
+  useEffect(() => {
+  const updateBounds = () => {
+    const slot = contentSlotRef.current
+    if (!slot) return
+
+    const rect = slot.getBoundingClientRect()
+
+    window.jayxBrowser.setContentBounds({
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+    })
+  }
+
+  const observer = new ResizeObserver(updateBounds)
+
+  if (workspaceRef.current) {
+    observer.observe(workspaceRef.current)
+  }
+
+  if (contentSlotRef.current) {
+    observer.observe(contentSlotRef.current)
+  }
+
+  updateBounds()
+
+  const unsubscribeNavigation =
+    window.jayxBrowser.onNavigationState((state) => {
+      setCanGoBack(state.canGoBack)
+      setCanGoForward(state.canGoForward)
+      setIsLoading(state.loading)
+
+      if (state.url) {
+        setTabs((current) =>
+          current.map((tab) =>
+            tab.id === activeId
+              ? {
+                  ...tab,
+                  url: state.url,
+                  title: state.title || getDisplayTitle(state.url),
+                }
+              : tab,
+          ),
+        )
+
+        setAddress(state.url)
+      }
+
+      setNotice(
+        state.loading
+          ? 'Loading website...'
+          : state.title || state.url || 'Ready',
+      )
+    })
+
+  const unsubscribeResize =
+    window.jayxBrowser.onWindowResized(updateBounds)
+
+  return () => {
+    observer.disconnect()
+    unsubscribeNavigation()
+    unsubscribeResize()
+  }
+}, [activeId, activeTab.url, showAI])
 
   function addTab() {
     const id = Math.max(0, ...tabs.map((tab) => tab.id)) + 1
@@ -65,43 +137,58 @@ function App() {
     }
   }
 
-  function navigate(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const input = address.trim()
-    if (!input) return
+  async function navigate(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault()
 
-    const destination = /^https?:\/\//i.test(input)
-      ? input
-      : input.includes('.') && !input.includes(' ')
-        ? `https://${input}`
-        : `https://www.google.com/search?q=${encodeURIComponent(input)}`
+  const input = address.trim()
+  if (!input) return
+
+  setNotice('Opening destination...')
+
+  try {
+    const result = await window.jayxBrowser.navigate(input)
+
+    if (!result.ok) {
+      setNotice(result.error)
+      return
+    }
 
     setTabs((current) =>
       current.map((tab) =>
         tab.id === activeId
           ? {
               ...tab,
-              url: destination,
-              title: getDisplayTitle(destination),
+              url: result.url,
+              title: getDisplayTitle(result.url),
             }
-          : tab
-      )
+          : tab,
+      ),
     )
 
+    setAddress(result.url)
+  } catch (error) {
     setNotice(
-      'Address recognized. Real website loading will be connected in the next step.'
+      error instanceof Error
+        ? error.message
+        : 'Navigation failed.',
     )
+  }
+}
+
+ function selectTab(tab: BrowserTab) {
+  setActiveId(tab.id)
+  setAddress(tab.url)
+
+  if (tab.url) {
+    void window.jayxBrowser.navigate(tab.url)
+  } else {
+    void window.jayxBrowser.hidePage()
   }
 
-  function selectTab(tab: BrowserTab) {
-    setActiveId(tab.id)
-    setAddress(tab.url)
-    setNotice(
-      tab.url
-        ? `Selected ${tab.title}. Website rendering is not connected yet.`
-        : 'Your browser workspace, ready to explore.'
-    )
-  }
+  setNotice(
+    tab.url ? `Opening ${tab.title}...` : 'New tab selected.',
+  )
+}
 
   function openShortcut(url: string) {
     setAddress(url)
@@ -158,18 +245,26 @@ function App() {
 
       <div className="toolbar">
         <div className="nav-controls">
-          <button className="icon-button" disabled title="Back — coming soon">
-            ←
-          </button>
-          <button className="icon-button" disabled title="Forward — coming soon">
-            →
-          </button>
+<button
+  className="icon-button"
+  onClick={() => void window.jayxBrowser.back()}
+  disabled={!canGoBack}
+  title="Back"
+>
+  ←
+</button>
+
+<button
+  className="icon-button"
+  onClick={() => void window.jayxBrowser.forward()}
+  disabled={!canGoForward}
+  title="Forward"
+>
+  →
+</button>
           <button
             className="icon-button"
-            onClick={() => {
-              setAddress(activeTab.url)
-              setNotice('Reload will work when website rendering is connected.')
-            }}
+            onClick={() => void window.jayxBrowser.reload()}
             title="Reload"
           >
             ↻
@@ -179,6 +274,7 @@ function App() {
             onClick={() => {
               setAddress('')
               setNotice('Returned to the JayX new-tab workspace.')
+              void window.jayxBrowser.hidePage()
               setTabs((current) =>
                 current.map((tab) =>
                   tab.id === activeId
@@ -215,7 +311,14 @@ function App() {
         </button>
       </div>
 
-      <div className="workspace">
+      <div className="workspace" ref={workspaceRef}>
+        {activeTab.url ? (
+  <div
+    className="web-content-slot"
+    ref={contentSlotRef}
+    aria-label="Website content"
+  />
+) : (
         <section className="home-content">
           <div className="eyebrow">
             <span className="status-dot" />
@@ -286,10 +389,10 @@ function App() {
 
           <p className="status-message" role="status">
             <span className="status-dot" />
-            {notice}
+            {isLoading ? 'Loading website...' : notice}
           </p>
         </section>
-
+)}
         {showAI && (
           <aside className="ai-panel">
             <div className="ai-panel-header">

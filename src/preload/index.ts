@@ -1,22 +1,52 @@
-import { contextBridge } from 'electron'
-import { electronAPI } from '@electron-toolkit/preload'
 
-// Custom APIs for renderer
-const api = {}
+import { contextBridge, ipcRenderer } from 'electron'
 
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
-if (process.contextIsolated) {
-  try {
-    contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('api', api)
-  } catch (error) {
-    console.error(error)
-  }
-} else {
-  // @ts-ignore (define in dts)
-  window.electron = electronAPI
-  // @ts-ignore (define in dts)
-  window.api = api
+export type JayXNavigationState = {
+  url: string
+  title: string
+  canGoBack: boolean
+  canGoForward: boolean
+  loading: boolean
 }
+
+contextBridge.exposeInMainWorld('jayxBrowser', {
+  navigate: (input: string) =>
+    ipcRenderer.invoke('jayx:navigate', input),
+
+  back: () => ipcRenderer.invoke('jayx:back'),
+  forward: () => ipcRenderer.invoke('jayx:forward'),
+  reload: () => ipcRenderer.invoke('jayx:reload'),
+  hidePage: () => ipcRenderer.invoke('jayx:hide-page'),
+
+  setContentBounds: (bounds: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }) => ipcRenderer.send('jayx:set-content-bounds', bounds),
+
+  onNavigationState: (
+    callback: (state: JayXNavigationState) => void,
+  ) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      state: JayXNavigationState,
+    ) => callback(state)
+
+    ipcRenderer.on('jayx:navigation-state', listener)
+
+    return () => {
+      ipcRenderer.removeListener('jayx:navigation-state', listener)
+    }
+  },
+
+  onWindowResized: (callback: () => void) => {
+    const listener = () => callback()
+
+    ipcRenderer.on('jayx:window-resized', listener)
+
+    return () => {
+      ipcRenderer.removeListener('jayx:window-resized', listener)
+    }
+  },
+})

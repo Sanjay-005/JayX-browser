@@ -661,6 +661,13 @@ button:disabled {
   gap: 7px;
 }
 
+.web-content-slot {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: #ffffff;
+}
+
 /* Smaller windows */
 
 @media (max-width: 850px) {

@@ -1,74 +1,267 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
-import { join } from 'path'
-import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import icon from '../../resources/icon.png?asset'
 
-function createWindow(): void {
-  // Create the browser window.
-  const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
-    show: false,
-    autoHideMenuBar: true,
-    ...(process.platform === 'linux' ? { icon } : {}),
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
-    }
-  })
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  shell,
+  WebContentsView,
+} from 'electron'
+import { join } from 'node:path'
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
-  })
+let mainWindow: BrowserWindow | null = null
+let browserView: WebContentsView | null = null
+let currentUrl = ''
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
-    return { action: 'deny' }
-  })
+const hiddenBounds = {
+  x: -10000,
+  y: -10000,
+  width: 1,
+  height: 1,
+}
 
-  // HMR for renderer base on electron-vite cli.
-  // Load the remote URL for development or the local html file for production.
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+let contentBounds = {
+  x: 0,
+  y: 110,
+  width: 1000,
+  height: 600,
+}
+
+function isSafeWebUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+  } catch {
+    return false
   }
 }
 
-// This method will be called when Electron has finished
-// initialization and is ready to create browser windows.
-// Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
-  // Set app user model id for windows
-  electronApp.setAppUserModelId('com.electron')
+function resolveDestination(input: string): string {
+  const value = input.trim()
 
-  // Default open or close DevTools by F12 in development
-  // and ignore CommandOrControl + R in production.
-  // see https://github.com/alex8088/electron-toolkit/tree/master/packages/utils
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
+  if (!value || value.length > 2048) {
+    throw new Error('Enter a valid website or search query.')
+  }
+
+  let candidate: string
+
+  if (/^https?:\/\//i.test(value)) {
+    candidate = value
+  } else if (
+    !/\s/.test(value) &&
+    /^[\w.-]+(?::\d+)?(?:\/.*)?$/.test(value) &&
+    value.includes('.')
+  ) {
+    candidate = `https://${value}`
+  } else {
+    candidate = `https://www.google.com/search?q=${encodeURIComponent(value)}`
+  }
+
+  if (!isSafeWebUrl(candidate)) {
+    throw new Error('Only HTTP and HTTPS destinations are allowed.')
+  }
+
+  return candidate
+}
+
+function sendNavigationState() {
+  if (!mainWindow || !browserView || mainWindow.isDestroyed()) return
+
+  mainWindow.webContents.send('jayx:navigation-state', {
+    url: browserView.webContents.getURL(),
+    title: browserView.webContents.getTitle(),
+    canGoBack: browserView.webContents.navigationHistory.canGoBack(),
+    canGoForward: browserView.webContents.navigationHistory.canGoForward(),
+    loading: browserView.webContents.isLoading(),
+  })
+}
+
+function setBrowserBounds() {
+  if (!browserView) return
+
+  browserView.setBounds(
+    currentUrl ? contentBounds : hiddenBounds,
+  )
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 800,
+    minHeight: 600,
+    autoHideMenuBar: true,
+    backgroundColor: '#101216',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
   })
 
-  // IPC test
-  ipcMain.on('ping', () => console.log('pong'))
+  browserView = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
 
+  mainWindow.contentView.addChildView(browserView)
+  setBrowserBounds()
+
+  const contents = browserView.webContents
+
+  contents.on('did-start-loading', sendNavigationState)
+  contents.on('did-stop-loading', sendNavigationState)
+  contents.on('did-navigate', sendNavigationState)
+  contents.on('did-navigate-in-page', sendNavigationState)
+  contents.on('page-title-updated', sendNavigationState)
+
+  contents.on('will-navigate', (event, url) => {
+    if (!isSafeWebUrl(url)) {
+      event.preventDefault()
+    }
+  })
+
+  contents.setWindowOpenHandler(({ url }) => {
+    if (isSafeWebUrl(url)) {
+      void shell.openExternal(url)
+    }
+
+    return { action: 'deny' }
+  })
+
+  mainWindow.on('resize', () => {
+    // The renderer will report the actual content area's bounds.
+    mainWindow?.webContents.send('jayx:window-resized')
+  })
+
+  mainWindow.on('closed', () => {
+    browserView?.webContents.close()
+    browserView = null
+    mainWindow = null
+    currentUrl = ''
+  })
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else {
+    void mainWindow.loadFile(
+      join(__dirname, '../renderer/index.html'),
+    )
+  }
+}
+
+function isTrustedRenderer(sender: Electron.WebContents): boolean {
+  return Boolean(
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    sender === mainWindow.webContents,
+  )
+}
+
+ipcMain.handle('jayx:navigate', async (event, input: unknown) => {
+  if (!isTrustedRenderer(event.sender)) {
+    throw new Error('Untrusted navigation request.')
+  }
+
+  if (typeof input !== 'string') {
+    throw new Error('The destination must be text.')
+  }
+
+  const destination = resolveDestination(input)
+
+  if (!browserView) {
+    throw new Error('The browser surface is not ready.')
+  }
+
+  currentUrl = destination
+  setBrowserBounds()
+
+  try {
+    await browserView.webContents.loadURL(destination)
+    sendNavigationState()
+    return { ok: true, url: destination }
+  } catch {
+    return {
+      ok: false,
+      error: 'Unable to load this destination. Check your connection or URL.',
+    }
+  }
+})
+
+ipcMain.handle('jayx:back', (event) => {
+  if (!isTrustedRenderer(event.sender) || !browserView) return
+
+  const history = browserView.webContents.navigationHistory
+
+  if (history.canGoBack()) {
+    history.goBack()
+  }
+})
+
+ipcMain.handle('jayx:forward', (event) => {
+  if (!isTrustedRenderer(event.sender) || !browserView) return
+
+  const history = browserView.webContents.navigationHistory
+
+  if (history.canGoForward()) {
+    history.goForward()
+  }
+})
+
+ipcMain.handle('jayx:reload', (event) => {
+  if (!isTrustedRenderer(event.sender) || !browserView) return
+
+  browserView.webContents.reload()
+})
+
+ipcMain.handle('jayx:hide-page', (event) => {
+  if (!isTrustedRenderer(event.sender)) return
+
+  currentUrl = ''
+  setBrowserBounds()
+})
+
+ipcMain.on('jayx:set-content-bounds', (event, value: unknown) => {
+  if (!isTrustedRenderer(event.sender) || !value || typeof value !== 'object') {
+    return
+  }
+
+  const bounds = value as Record<string, unknown>
+  const { x, y, width, height } = bounds
+
+  if (
+    ![x, y, width, height].every(
+      (number) => typeof number === 'number' && Number.isFinite(number),
+    )
+  ) {
+    return
+  }
+
+  contentBounds = {
+    x: Math.max(0, Math.round(x as number)),
+    y: Math.max(0, Math.round(y as number)),
+    width: Math.max(1, Math.round(width as number)),
+    height: Math.max(1, Math.round(height as number)),
+  }
+
+  setBrowserBounds()
+})
+
+app.whenReady().then(() => {
   createWindow()
 
-  app.on('activate', function () {
-    // On macOS it's common to re-create a window in the app when the
-    // dock icon is clicked and there are no other windows open.
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+    }
   })
 })
 
-// Quit when all windows are closed, except on macOS. There, it's common
-// for applications and their menu bar to stay active until the user quits
-// explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
-
-// In this file you can include the rest of your app's specific main process
-// code. You can also put them in separate files and require them here.
