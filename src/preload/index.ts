@@ -2,6 +2,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 export type JayXNavigationState = {
+  tabId: string
   url: string
   title: string
   canGoBack: boolean
@@ -9,21 +10,37 @@ export type JayXNavigationState = {
   loading: boolean
 }
 
+export type JayXContentBounds = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 contextBridge.exposeInMainWorld('jayxBrowser', {
-  navigate: (input: string) =>
-    ipcRenderer.invoke('jayx:navigate', input),
+  navigate: (input: string, tabId?: string) =>
+    ipcRenderer.invoke(
+      'jayx:navigate',
+      tabId ? { tabId, input } : input,
+    ),
 
-  back: () => ipcRenderer.invoke('jayx:back'),
-  forward: () => ipcRenderer.invoke('jayx:forward'),
-  reload: () => ipcRenderer.invoke('jayx:reload'),
-  hidePage: () => ipcRenderer.invoke('jayx:hide-page'),
+  activateTab: (tabId: string) =>
+    ipcRenderer.invoke('jayx:activate-tab', tabId),
 
-  setContentBounds: (bounds: {
-    x: number
-    y: number
-    width: number
-    height: number
-  }) => ipcRenderer.send('jayx:set-content-bounds', bounds),
+  back: (tabId?: string) =>
+    ipcRenderer.invoke('jayx:back', tabId),
+
+  forward: (tabId?: string) =>
+    ipcRenderer.invoke('jayx:forward', tabId),
+
+  reload: (tabId?: string) =>
+    ipcRenderer.invoke('jayx:reload', tabId),
+
+  hidePage: (tabId?: string) =>
+    ipcRenderer.invoke('jayx:hide-page', tabId),
+
+  setContentBounds: (bounds: JayXContentBounds) =>
+    ipcRenderer.send('jayx:set-content-bounds', bounds),
 
   onNavigationState: (
     callback: (state: JayXNavigationState) => void,

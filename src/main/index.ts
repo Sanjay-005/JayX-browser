@@ -1,35 +1,36 @@
 
-import {
-  app,
-  BrowserWindow,
-  ipcMain,
-  shell,
-  WebContentsView,
-} from 'electron'
+import { app, BrowserWindow, ipcMain, shell, WebContentsView } from 'electron'
 import { join } from 'node:path'
 
+type ContentBounds = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+type NavigationPayload = {
+  tabId: string
+  input: string
+}
+
 let mainWindow: BrowserWindow | null = null
-let browserView: WebContentsView | null = null
-let currentUrl = ''
+let activeTabId = 'tab-1'
 
-const hiddenBounds = {
-  x: -10000,
-  y: -10000,
-  width: 1,
-  height: 1,
-}
-
-let contentBounds = {
+let contentBounds: ContentBounds = {
   x: 0,
-  y: 110,
-  width: 1000,
-  height: 600,
+  y: 0,
+  width: 0,
+  height: 0,
 }
+
+const browserViews = new Map<string, WebContentsView>()
+const tabUrls = new Map<string, string>()
 
 function isSafeWebUrl(value: string): boolean {
   try {
-    const parsed = new URL(value)
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:'
   } catch {
     return false
   }
@@ -38,59 +39,129 @@ function isSafeWebUrl(value: string): boolean {
 function resolveDestination(input: string): string {
   const value = input.trim()
 
-  if (!value || value.length > 2048) {
-    throw new Error('Enter a valid website or search query.')
+  if (!value) {
+    throw new Error('Enter a URL or search query.')
   }
 
-  let candidate: string
-
-  if (/^https?:\/\//i.test(value)) {
-    candidate = value
-  } else if (
-    !/\s/.test(value) &&
-    /^[\w.-]+(?::\d+)?(?:\/.*)?$/.test(value) &&
-    value.includes('.')
-  ) {
-    candidate = `https://${value}`
-  } else {
-    candidate = `https://www.google.com/search?q=${encodeURIComponent(value)}`
+  if (isSafeWebUrl(value)) {
+    return new URL(value).toString()
   }
 
-  if (!isSafeWebUrl(candidate)) {
-    throw new Error('Only HTTP and HTTPS destinations are allowed.')
+  // Treat a domain or localhost address as a website.
+  if (!/\s/.test(value) && (value.includes('.') || value.startsWith('localhost'))) {
+    const candidate = `https://${value}`
+
+    if (isSafeWebUrl(candidate)) {
+      return new URL(candidate).toString()
+    }
   }
 
-  return candidate
+  return `https://www.google.com/search?q=${encodeURIComponent(value)}`
 }
 
-function sendNavigationState() {
-  if (!mainWindow || !browserView || mainWindow.isDestroyed()) return
+function isTrustedRenderer(sender: Electron.WebContents): boolean {
+  return Boolean(mainWindow && sender === mainWindow.webContents)
+}
+
+function sendNavigationState(tabId: string): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+
+  const view = browserViews.get(tabId)
 
   mainWindow.webContents.send('jayx:navigation-state', {
-    url: browserView.webContents.getURL(),
-    title: browserView.webContents.getTitle(),
-    canGoBack: browserView.webContents.navigationHistory.canGoBack(),
-    canGoForward: browserView.webContents.navigationHistory.canGoForward(),
-    loading: browserView.webContents.isLoading(),
+    tabId,
+    url: tabUrls.get(tabId) ?? '',
+    title: view?.webContents.getTitle() || 'New Tab',
+    canGoBack: view?.webContents.navigationHistory.canGoBack() ?? false,
+    canGoForward: view?.webContents.navigationHistory.canGoForward() ?? false,
+    loading: view?.webContents.isLoading() ?? false,
   })
 }
 
-function setBrowserBounds() {
-  if (!browserView) return
+function updateViewBounds(): void {
+  for (const [tabId, view] of browserViews) {
+    const isActive = tabId === activeTabId
+    const hasPage = Boolean(tabUrls.get(tabId))
 
-  browserView.setBounds(
-    currentUrl ? contentBounds : hiddenBounds,
-  )
+    view.setBounds(
+      isActive && hasPage
+        ? contentBounds
+        : { x: 0, y: 0, width: 0, height: 0 },
+    )
+  }
 }
 
-function createWindow() {
+function activateTab(tabId: string): void {
+  activeTabId = tabId
+  updateViewBounds()
+  sendNavigationState(tabId)
+}
+
+function getOrCreateBrowserView(tabId: string): WebContentsView {
+  const existingView = browserViews.get(tabId)
+
+  if (existingView) return existingView
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    throw new Error('The JayX window is not available.')
+  }
+
+  const view = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+
+  browserViews.set(tabId, view)
+  mainWindow.contentView.addChildView(view)
+
+  view.webContents.on('did-start-loading', () => {
+    sendNavigationState(tabId)
+  })
+
+  view.webContents.on('did-stop-loading', () => {
+    sendNavigationState(tabId)
+  })
+
+  view.webContents.on('did-navigate', (_event, url) => {
+    tabUrls.set(tabId, url)
+    sendNavigationState(tabId)
+  })
+
+  view.webContents.on('did-navigate-in-page', (_event, url) => {
+    tabUrls.set(tabId, url)
+    sendNavigationState(tabId)
+  })
+
+  view.webContents.on('page-title-updated', () => {
+    sendNavigationState(tabId)
+  })
+
+  view.webContents.on('will-navigate', (event, url) => {
+    if (!isSafeWebUrl(url)) {
+      event.preventDefault()
+    }
+  })
+
+  view.webContents.setWindowOpenHandler(({ url }) => {
+    if (isSafeWebUrl(url)) {
+      void shell.openExternal(url)
+    }
+
+    return { action: 'deny' }
+  })
+
+  return view
+}
+
+function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 800,
-    minHeight: 600,
-    autoHideMenuBar: true,
-    backgroundColor: '#101216',
+    width: 1440,
+    height: 900,
+    minWidth: 1000,
+    minHeight: 650,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -99,155 +170,123 @@ function createWindow() {
     },
   })
 
-  browserView = new WebContentsView({
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  })
-
-  mainWindow.contentView.addChildView(browserView)
-  setBrowserBounds()
-
-  const contents = browserView.webContents
-
-  contents.on('did-start-loading', sendNavigationState)
-  contents.on('did-stop-loading', sendNavigationState)
-  contents.on('did-navigate', sendNavigationState)
-  contents.on('did-navigate-in-page', sendNavigationState)
-  contents.on('page-title-updated', sendNavigationState)
-
-  contents.on('will-navigate', (event, url) => {
-    if (!isSafeWebUrl(url)) {
-      event.preventDefault()
-    }
-  })
-
-  contents.setWindowOpenHandler(({ url }) => {
-    if (isSafeWebUrl(url)) {
-      void shell.openExternal(url)
-    }
-
-    return { action: 'deny' }
-  })
-
   mainWindow.on('resize', () => {
-    // The renderer will report the actual content area's bounds.
     mainWindow?.webContents.send('jayx:window-resized')
-  })
-
-  mainWindow.on('closed', () => {
-    browserView?.webContents.close()
-    browserView = null
-    mainWindow = null
-    currentUrl = ''
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    void mainWindow.loadFile(
-      join(__dirname, '../renderer/index.html'),
-    )
-  }
-}
-
-function isTrustedRenderer(sender: Electron.WebContents): boolean {
-  return Boolean(
-    mainWindow &&
-    !mainWindow.isDestroyed() &&
-    sender === mainWindow.webContents,
-  )
-}
-
-ipcMain.handle('jayx:navigate', async (event, input: unknown) => {
-  if (!isTrustedRenderer(event.sender)) {
-    throw new Error('Untrusted navigation request.')
+    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
-  if (typeof input !== 'string') {
-    throw new Error('The destination must be text.')
-  }
-
-  const destination = resolveDestination(input)
-
-  if (!browserView) {
-    throw new Error('The browser surface is not ready.')
-  }
-
-  currentUrl = destination
-  setBrowserBounds()
-
-  try {
-    await browserView.webContents.loadURL(destination)
-    sendNavigationState()
-    return { ok: true, url: destination }
-  } catch {
-    return {
-      ok: false,
-      error: 'Unable to load this destination. Check your connection or URL.',
+  mainWindow.on('closed', () => {
+    for (const view of browserViews.values()) {
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.close()
+      }
     }
-  }
+
+    browserViews.clear()
+    tabUrls.clear()
+    mainWindow = null
+  })
+}
+
+ipcMain.handle(
+  'jayx:navigate',
+  async (event, payload: string | NavigationPayload) => {
+    if (!isTrustedRenderer(event.sender)) {
+      return { ok: false, error: 'Untrusted renderer.' }
+    }
+
+    // A string keeps the existing renderer API working during this step.
+    const tabId = typeof payload === 'string' ? activeTabId : payload.tabId
+    const input = typeof payload === 'string' ? payload : payload.input
+
+    try {
+      const destination = resolveDestination(input)
+      const view = getOrCreateBrowserView(tabId)
+
+      activeTabId = tabId
+      tabUrls.set(tabId, destination)
+      updateViewBounds()
+      sendNavigationState(tabId)
+
+      await view.webContents.loadURL(destination)
+
+      return { ok: true, url: destination }
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Navigation failed.',
+      }
+    }
+  },
+)
+
+ipcMain.handle('jayx:activate-tab', (event, tabId: string) => {
+  if (!isTrustedRenderer(event.sender) || typeof tabId !== 'string') return
+
+  activateTab(tabId)
 })
 
-ipcMain.handle('jayx:back', (event) => {
-  if (!isTrustedRenderer(event.sender) || !browserView) return
+ipcMain.handle('jayx:back', (event, tabId?: string) => {
+  if (!isTrustedRenderer(event.sender)) return
 
-  const history = browserView.webContents.navigationHistory
+  const view = browserViews.get(tabId ?? activeTabId)
+  const history = view?.webContents.navigationHistory
 
-  if (history.canGoBack()) {
+  if (history?.canGoBack()) {
     history.goBack()
   }
 })
 
-ipcMain.handle('jayx:forward', (event) => {
-  if (!isTrustedRenderer(event.sender) || !browserView) return
+ipcMain.handle('jayx:forward', (event, tabId?: string) => {
+  if (!isTrustedRenderer(event.sender)) return
 
-  const history = browserView.webContents.navigationHistory
+  const view = browserViews.get(tabId ?? activeTabId)
+  const history = view?.webContents.navigationHistory
 
-  if (history.canGoForward()) {
+  if (history?.canGoForward()) {
     history.goForward()
   }
 })
 
-ipcMain.handle('jayx:reload', (event) => {
-  if (!isTrustedRenderer(event.sender) || !browserView) return
-
-  browserView.webContents.reload()
-})
-
-ipcMain.handle('jayx:hide-page', (event) => {
+ipcMain.handle('jayx:reload', (event, tabId?: string) => {
   if (!isTrustedRenderer(event.sender)) return
 
-  currentUrl = ''
-  setBrowserBounds()
+  const view = browserViews.get(tabId ?? activeTabId)
+
+  if (view && !view.webContents.isDestroyed()) {
+    view.webContents.reload()
+  }
 })
 
-ipcMain.on('jayx:set-content-bounds', (event, value: unknown) => {
-  if (!isTrustedRenderer(event.sender) || !value || typeof value !== 'object') {
-    return
-  }
+ipcMain.handle('jayx:hide-page', (event, tabId?: string) => {
+  if (!isTrustedRenderer(event.sender)) return
 
-  const bounds = value as Record<string, unknown>
-  const { x, y, width, height } = bounds
+  const targetTabId = tabId ?? activeTabId
+  tabUrls.delete(targetTabId)
+  updateViewBounds()
+  sendNavigationState(targetTabId)
+})
 
-  if (
-    ![x, y, width, height].every(
-      (number) => typeof number === 'number' && Number.isFinite(number),
-    )
-  ) {
-    return
-  }
+ipcMain.on('jayx:set-content-bounds', (event, bounds: ContentBounds) => {
+  if (!isTrustedRenderer(event.sender)) return
 
-  contentBounds = {
-    x: Math.max(0, Math.round(x as number)),
-    y: Math.max(0, Math.round(y as number)),
-    width: Math.max(1, Math.round(width as number)),
-    height: Math.max(1, Math.round(height as number)),
-  }
+  const valid =
+    Number.isFinite(bounds.x) &&
+    Number.isFinite(bounds.y) &&
+    Number.isFinite(bounds.width) &&
+    Number.isFinite(bounds.height) &&
+    bounds.width >= 0 &&
+    bounds.height >= 0
 
-  setBrowserBounds()
+  if (!valid) return
+
+  contentBounds = bounds
+  updateViewBounds()
 })
 
 app.whenReady().then(() => {

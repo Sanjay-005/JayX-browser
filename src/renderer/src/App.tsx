@@ -1,3 +1,4 @@
+
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import './assets/main.css'
 
@@ -26,104 +27,118 @@ function App() {
   const [tabs, setTabs] = useState<BrowserTab[]>([
     { id: 1, title: 'New Tab', url: '' },
   ])
+
   const [activeId, setActiveId] = useState(1)
   const [address, setAddress] = useState('')
   const [showAI, setShowAI] = useState(false)
   const [notice, setNotice] = useState(
-    'Your browser workspace, ready to explore.'
+    'Your browser workspace, ready to explore.',
   )
-
-  const workspaceRef = useRef<HTMLDivElement>(null)
-  const contentSlotRef = useRef<HTMLDivElement>(null)
 
   const [canGoBack, setCanGoBack] = useState(false)
   const [canGoForward, setCanGoForward] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
 
+  const workspaceRef = useRef<HTMLDivElement>(null)
+  const contentSlotRef = useRef<HTMLDivElement>(null)
+  const nextTabIdRef = useRef(2)
+
   const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs[0]
 
   useEffect(() => {
-  const updateBounds = () => {
-    const slot = contentSlotRef.current
-    if (!slot) return
+    const updateBounds = () => {
+      const slot = contentSlotRef.current
+      if (!slot) return
 
-    const rect = slot.getBoundingClientRect()
+      const rect = slot.getBoundingClientRect()
 
-    window.jayxBrowser.setContentBounds({
-      x: rect.x,
-      y: rect.y,
-      width: rect.width,
-      height: rect.height,
-    })
-  }
+      window.jayxBrowser.setContentBounds({
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      })
+    }
 
-  const observer = new ResizeObserver(updateBounds)
+    const observer = new ResizeObserver(updateBounds)
 
-  if (workspaceRef.current) {
-    observer.observe(workspaceRef.current)
-  }
+    if (workspaceRef.current) {
+      observer.observe(workspaceRef.current)
+    }
 
-  if (contentSlotRef.current) {
-    observer.observe(contentSlotRef.current)
-  }
+    if (contentSlotRef.current) {
+      observer.observe(contentSlotRef.current)
+    }
 
-  updateBounds()
+    updateBounds()
 
-  const unsubscribeNavigation =
-    window.jayxBrowser.onNavigationState((state) => {
-      setCanGoBack(state.canGoBack)
-      setCanGoForward(state.canGoForward)
-      setIsLoading(state.loading)
-
-      if (state.url) {
-        setTabs((current) =>
-          current.map((tab) =>
-            tab.id === activeId
+    const unsubscribeNavigation =
+      window.jayxBrowser.onNavigationState((state) => {
+        setTabs((currentTabs) =>
+          currentTabs.map((tab) =>
+            String(tab.id) === state.tabId
               ? {
                   ...tab,
                   url: state.url,
-                  title: state.title || getDisplayTitle(state.url),
+                  title: state.url
+                    ? state.title || getDisplayTitle(state.url)
+                    : 'New Tab',
                 }
               : tab,
           ),
         )
 
-        setAddress(state.url)
-      }
+        if (String(activeId) === state.tabId) {
+          setAddress(state.url)
+          setCanGoBack(state.canGoBack)
+          setCanGoForward(state.canGoForward)
+          setIsLoading(state.loading)
+        }
+      })
 
-      setNotice(
-        state.loading
-          ? 'Loading website...'
-          : state.title || state.url || 'Ready',
-      )
-    })
+    const unsubscribeResize =
+      window.jayxBrowser.onWindowResized(updateBounds)
 
-  const unsubscribeResize =
-    window.jayxBrowser.onWindowResized(updateBounds)
+    return () => {
+      observer.disconnect()
+      unsubscribeNavigation()
+      unsubscribeResize()
+    }
+  }, [activeId, activeTab.url, showAI])
 
-  return () => {
-    observer.disconnect()
-    unsubscribeNavigation()
-    unsubscribeResize()
-  }
-}, [activeId, activeTab.url, showAI])
+  async function addTab() {
+    const id = nextTabIdRef.current
+    nextTabIdRef.current += 1
 
-  function addTab() {
-    const id = Math.max(0, ...tabs.map((tab) => tab.id)) + 1
-    setTabs((current) => [
-      ...current,
-      { id, title: 'New Tab', url: '' },
-    ])
+    const newTab: BrowserTab = {
+      id,
+      title: 'New Tab',
+      url: '',
+    }
+
+    setTabs((current) => [...current, newTab])
     setActiveId(id)
     setAddress('')
-    setNotice('New tab created. Website navigation comes next.')
+    setNotice('New tab created. Enter a URL or search query to begin.')
+    setCanGoBack(false)
+    setCanGoForward(false)
+    setIsLoading(false)
+
+    await window.jayxBrowser.activateTab(String(id))
   }
 
-  function closeTab(id: number) {
+  async function closeTab(id: number) {
+    await window.jayxBrowser.hidePage(String(id))
+
     if (tabs.length === 1) {
       setTabs([{ id, title: 'New Tab', url: '' }])
       setActiveId(id)
       setAddress('')
+      setCanGoBack(false)
+      setCanGoForward(false)
+      setIsLoading(false)
+      setNotice('Your browser workspace is ready.')
+      await window.jayxBrowser.activateTab(String(id))
       return
     }
 
@@ -132,69 +147,100 @@ function App() {
 
     if (activeId === id) {
       const nextTab = remaining[remaining.length - 1]
+
       setActiveId(nextTab.id)
       setAddress(nextTab.url)
+      setCanGoBack(false)
+      setCanGoForward(false)
+      setIsLoading(false)
+
+      await window.jayxBrowser.activateTab(String(nextTab.id))
+
+      if (!nextTab.url) {
+        await window.jayxBrowser.hidePage(String(nextTab.id))
+      }
     }
   }
 
-  async function navigate(event: FormEvent<HTMLFormElement>) {
-  event.preventDefault()
+  async function navigate(
+    input: string,
+    tabId: number = activeId,
+  ) {
+    const trimmedInput = input.trim()
 
-  const input = address.trim()
-  if (!input) return
+    if (!trimmedInput) return
 
-  setNotice('Opening destination...')
+    setNotice('')
 
-  try {
-    const result = await window.jayxBrowser.navigate(input)
-
-    if (!result.ok) {
-      setNotice(result.error)
-      return
+    if (tabId === activeId) {
+      setAddress(trimmedInput)
+      setIsLoading(true)
     }
+
+    try {
+      const result = await window.jayxBrowser.navigate(
+        trimmedInput,
+        String(tabId),
+      )
+
+      if (!result.ok) {
+        if (tabId === activeId) {
+          setNotice(result.error)
+          setIsLoading(false)
+        }
+      }
+    } catch (error) {
+      if (tabId === activeId) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : 'Navigation failed. Please try again.',
+        )
+        setIsLoading(false)
+      }
+    }
+  }
+
+  function handleNavigateSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    void navigate(address)
+  }
+
+  async function selectTab(tab: BrowserTab) {
+    setActiveId(tab.id)
+    setAddress(tab.url)
+    setNotice('')
+    setCanGoBack(false)
+    setCanGoForward(false)
+    setIsLoading(false)
+
+    await window.jayxBrowser.activateTab(String(tab.id))
+
+    if (!tab.url) {
+      await window.jayxBrowser.hidePage(String(tab.id))
+    }
+  }
+
+  function openShortcut(url: string) {
+    void navigate(url)
+  }
+
+  async function goHome() {
+    setAddress('')
+    setNotice('Returned to the JayX new-tab workspace.')
+    setCanGoBack(false)
+    setCanGoForward(false)
+    setIsLoading(false)
 
     setTabs((current) =>
       current.map((tab) =>
         tab.id === activeId
-          ? {
-              ...tab,
-              url: result.url,
-              title: getDisplayTitle(result.url),
-            }
+          ? { ...tab, title: 'New Tab', url: '' }
           : tab,
       ),
     )
 
-    setAddress(result.url)
-  } catch (error) {
-    setNotice(
-      error instanceof Error
-        ? error.message
-        : 'Navigation failed.',
-    )
-  }
-}
-
- function selectTab(tab: BrowserTab) {
-  setActiveId(tab.id)
-  setAddress(tab.url)
-
-  if (tab.url) {
-    void window.jayxBrowser.navigate(tab.url)
-  } else {
-    void window.jayxBrowser.hidePage()
-  }
-
-  setNotice(
-    tab.url ? `Opening ${tab.title}...` : 'New tab selected.',
-  )
-}
-
-  function openShortcut(url: string) {
-    setAddress(url)
-    setNotice(
-      `Selected ${getDisplayTitle(url)}. Website loading comes in the next step.`
-    )
+    await window.jayxBrowser.hidePage(String(activeId))
   }
 
   return (
@@ -210,25 +256,32 @@ function App() {
             <button
               key={tab.id}
               className={`tab ${activeId === tab.id ? 'active' : ''}`}
-              onClick={() => selectTab(tab)}
+              onClick={() => void selectTab(tab)}
               title={tab.title}
             >
               <span className="tab-dot" />
               <span className="tab-title">{tab.title}</span>
+
               <span
                 className="tab-close"
                 role="button"
                 aria-label={`Close ${tab.title}`}
                 onClick={(event) => {
                   event.stopPropagation()
-                  closeTab(tab.id)
+                  void closeTab(tab.id)
                 }}
               >
                 ×
               </span>
             </button>
           ))}
-          <button className="new-tab" onClick={addTab} title="New tab">
+
+          <button
+            className="new-tab"
+            onClick={() => void addTab()}
+            title="New tab"
+            aria-label="New tab"
+          >
             +
           </button>
         </div>
@@ -245,52 +298,48 @@ function App() {
 
       <div className="toolbar">
         <div className="nav-controls">
-<button
-  className="icon-button"
-  onClick={() => void window.jayxBrowser.back()}
-  disabled={!canGoBack}
-  title="Back"
->
-  ←
-</button>
-
-<button
-  className="icon-button"
-  onClick={() => void window.jayxBrowser.forward()}
-  disabled={!canGoForward}
-  title="Forward"
->
-  →
-</button>
           <button
             className="icon-button"
-            onClick={() => void window.jayxBrowser.reload()}
+            onClick={() => void window.jayxBrowser.back(String(activeId))}
+            disabled={!canGoBack}
+            title="Back"
+          >
+            ←
+          </button>
+
+          <button
+            className="icon-button"
+            onClick={() =>
+              void window.jayxBrowser.forward(String(activeId))
+            }
+            disabled={!canGoForward}
+            title="Forward"
+          >
+            →
+          </button>
+
+          <button
+            className="icon-button"
+            onClick={() =>
+              void window.jayxBrowser.reload(String(activeId))
+            }
             title="Reload"
           >
             ↻
           </button>
+
           <button
             className="icon-button"
-            onClick={() => {
-              setAddress('')
-              setNotice('Returned to the JayX new-tab workspace.')
-              void window.jayxBrowser.hidePage()
-              setTabs((current) =>
-                current.map((tab) =>
-                  tab.id === activeId
-                    ? { ...tab, title: 'New Tab', url: '' }
-                    : tab
-                )
-              )
-            }}
+            onClick={() => void goHome()}
             title="Home"
           >
             ⌂
           </button>
         </div>
 
-        <form className="address-form" onSubmit={navigate}>
+        <form className="address-form" onSubmit={handleNavigateSubmit}>
           <span className="address-lock">◇</span>
+
           <input
             aria-label="Address and search"
             value={address}
@@ -298,7 +347,12 @@ function App() {
             placeholder="Search the web or enter an address"
             spellCheck={false}
           />
-          <button className="address-submit" type="submit" title="Go">
+
+          <button
+            className="address-submit"
+            type="submit"
+            title="Go"
+          >
             ↵
           </button>
         </form>
@@ -313,93 +367,114 @@ function App() {
 
       <div className="workspace" ref={workspaceRef}>
         {activeTab.url ? (
-  <div
-    className="web-content-slot"
-    ref={contentSlotRef}
-    aria-label="Website content"
-  />
-) : (
-        <section className="home-content">
-          <div className="eyebrow">
-            <span className="status-dot" />
-            YOUR PRIVATE WORKSPACE
-          </div>
-
-          <h1>
-            Browse beyond
-            <br />
-            <span>the ordinary.</span>
-          </h1>
-
-          <p className="hero-description">
-            One workspace for the web, your research, and your ideas.
-            Built with privacy and local AI in mind.
-          </p>
-
-          <form className="hero-search" onSubmit={navigate}>
-            <span className="search-symbol">⌕</span>
-            <input
-              aria-label="Search or enter a website"
-              value={address}
-              onChange={(event) => setAddress(event.target.value)}
-              placeholder="Where would you like to go?"
-              spellCheck={false}
-            />
-            <button type="submit">Explore ↗</button>
-          </form>
-
-          <div className="section-heading">
-            <span>QUICK ACCESS</span>
-            <span className="muted">Your starting points</span>
-          </div>
-
-          <div className="shortcuts">
-            {shortcuts.map((shortcut) => (
-              <button
-                className="shortcut"
-                key={shortcut.name}
-                onClick={() => openShortcut(shortcut.url)}
-              >
-                <span className="shortcut-icon">{shortcut.symbol}</span>
-                <span className="shortcut-name">{shortcut.name}</span>
-                <span className="shortcut-arrow">↗</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="feature-card">
-            <div className="feature-icon">✳</div>
-            <div className="feature-copy">
-              <span className="feature-label">INTRODUCING JAYX AI</span>
-              <h2>Your next idea starts here.</h2>
-              <p>
-                Understand pages, explore research, and find connections
-                with an assistant designed to work locally.
-              </p>
-              <button
-                className="text-button"
-                onClick={() => setShowAI(true)}
-              >
-                Explore the AI workspace <span>→</span>
-              </button>
+          <div
+            className="web-content-slot"
+            ref={contentSlotRef}
+            aria-label="Website content"
+          />
+        ) : (
+          <section className="home-content">
+            <div className="eyebrow">
+              <span className="status-dot" />
+              YOUR PRIVATE WORKSPACE
             </div>
-            <div className="feature-orbit orbit-one" />
-            <div className="feature-orbit orbit-two" />
-          </div>
 
-          <p className="status-message" role="status">
-            <span className="status-dot" />
-            {isLoading ? 'Loading website...' : notice}
-          </p>
-        </section>
-)}
+            <h1>
+              Browse beyond
+              <br />
+              <span>the ordinary.</span>
+            </h1>
+
+            <p className="hero-description">
+              One workspace for the web, your research, and your ideas.
+              Built with privacy and local AI in mind.
+            </p>
+
+            <form
+              className="hero-search"
+              onSubmit={handleNavigateSubmit}
+            >
+              <span className="search-symbol">⌕</span>
+
+              <input
+                aria-label="Search or enter a website"
+                value={address}
+                onChange={(event) => setAddress(event.target.value)}
+                placeholder="Where would you like to go?"
+                spellCheck={false}
+              />
+
+              <button type="submit">Explore ↗</button>
+            </form>
+
+            <div className="section-heading">
+              <span>QUICK ACCESS</span>
+              <span className="muted">Your starting points</span>
+            </div>
+
+            <div className="shortcuts">
+              {shortcuts.map((shortcut) => (
+                <button
+                  className="shortcut"
+                  key={shortcut.name}
+                  onClick={() => openShortcut(shortcut.url)}
+                >
+                  <span className="shortcut-icon">
+                    {shortcut.symbol}
+                  </span>
+                  <span className="shortcut-name">
+                    {shortcut.name}
+                  </span>
+                  <span className="shortcut-arrow">↗</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="feature-card">
+              <div className="feature-icon">✳</div>
+
+              <div className="feature-copy">
+                <span className="feature-label">
+                  INTRODUCING JAYX AI
+                </span>
+
+                <h2>Your next idea starts here.</h2>
+
+                <p>
+                  Understand pages, explore research, and find connections
+                  with an assistant designed to work locally.
+                </p>
+
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() => setShowAI(true)}
+                >
+                  Explore the AI workspace <span>→</span>
+                </button>
+              </div>
+
+              <div className="feature-orbit orbit-one" />
+              <div className="feature-orbit orbit-two" />
+            </div>
+
+            <p className="status-message" role="status">
+              <span className="status-dot" />
+              {isLoading ? 'Loading website...' : notice}
+            </p>
+          </section>
+        )}
+
         {showAI && (
           <aside className="ai-panel">
             <div className="ai-panel-header">
               <div>
-                <span className="feature-label">JAYX INTELLIGENCE</span>
+                <span className="feature-label">
+                  JAYX INTELLIGENCE
+                </span>
                 <h2>AI Assistant</h2>
               </div>
+
               <button
                 className="icon-button"
                 onClick={() => setShowAI(false)}
@@ -412,18 +487,24 @@ function App() {
             <div className="ai-placeholder">
               <div className="ai-orb">✳</div>
               <h3>Think beyond the tab.</h3>
+
               <p>
                 Local AI will help summarize pages, answer questions,
                 and search your saved research.
               </p>
-              <span className="coming-soon">AI ENGINE · COMING SOON</span>
+
+              <span className="coming-soon">
+                AI ENGINE · COMING SOON
+              </span>
             </div>
           </aside>
         )}
       </div>
 
       <footer className="status-bar">
-        <span><span className="status-dot" /> JayX Browser</span>
+        <span>
+          <span className="status-dot" /> JayX Browser
+        </span>
         <span>Local-first by design</span>
         <span>Build 0.1.0 · Preview</span>
       </footer>

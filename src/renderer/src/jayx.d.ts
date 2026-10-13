@@ -6,15 +6,17 @@ declare global {
     jayxBrowser: {
       navigate: (
         input: string,
+        tabId?: string,
       ) => Promise<
         | { ok: true; url: string }
         | { ok: false; error: string }
       >
 
-      back: () => Promise<void>
-      forward: () => Promise<void>
-      reload: () => Promise<void>
-      hidePage: () => Promise<void>
+      activateTab: (tabId: string) => Promise<void>
+      back: (tabId?: string) => Promise<void>
+      forward: (tabId?: string) => Promise<void>
+      reload: (tabId?: string) => Promise<void>
+      hidePage: (tabId?: string) => Promise<void>
 
       setContentBounds: (bounds: {
         x: number
@@ -25,6 +27,7 @@ declare global {
 
       onNavigationState: (
         callback: (state: {
+          tabId: string
           url: string
           title: string
           canGoBack: boolean
