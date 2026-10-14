@@ -18,6 +18,15 @@ export type JayXContentBounds = {
 }
 
 contextBridge.exposeInMainWorld('jayxBrowser', {
+  loadWorkspace: () =>
+    ipcRenderer.invoke('jayx:load-workspace'),
+
+  saveWorkspace: (state: {
+    tabs: { id: number; title: string; url: string }[]
+    activeId: number
+    bookmarks: { id: string; title: string; url: string }[]
+  }) => ipcRenderer.invoke('jayx:save-workspace', state),
+
   navigate: (input: string, tabId?: string) =>
     ipcRenderer.invoke(
       'jayx:navigate',
@@ -26,6 +35,10 @@ contextBridge.exposeInMainWorld('jayxBrowser', {
 
   activateTab: (tabId: string) =>
     ipcRenderer.invoke('jayx:activate-tab', tabId),
+
+  closeTab: (tabId: string) =>
+    ipcRenderer.invoke('jayx:close-tab', tabId),
+
 
   back: (tabId?: string) =>
     ipcRenderer.invoke('jayx:back', tabId),

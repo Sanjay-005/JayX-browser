@@ -8,6 +8,18 @@ type BrowserTab = {
   url: string
 }
 
+type SavedBookmark = {
+  id: string
+  title: string
+  url: string
+}
+
+type WorkspaceState = {
+  tabs: BrowserTab[]
+  activeId: number
+  bookmarks: SavedBookmark[]
+}
+
 const shortcuts = [
   { name: 'Google', url: 'https://www.google.com', symbol: 'G' },
   { name: 'GitHub', url: 'https://github.com', symbol: '⌘' },
@@ -42,6 +54,9 @@ function App() {
   const workspaceRef = useRef<HTMLDivElement>(null)
   const contentSlotRef = useRef<HTMLDivElement>(null)
   const nextTabIdRef = useRef(2)
+
+  const [bookmarks, setBookmarks] = useState<SavedBookmark[]>([])
+  const [workspaceLoaded, setWorkspaceLoaded] = useState(false)
 
   const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs[0]
 
@@ -106,6 +121,86 @@ function App() {
     }
   }, [activeId, activeTab.url, showAI])
 
+  useEffect(() => {
+  let cancelled = false
+
+  const restoreWorkspace = async () => {
+    try {
+      const saved = await window.jayxBrowser.loadWorkspace()
+
+      if (cancelled) return
+
+      const restoredTabs =
+        saved.tabs.length > 0
+          ? saved.tabs
+          : [{ id: 1, title: 'New Tab', url: '' }]
+
+      const restoredActiveId = restoredTabs.some(
+        (tab) => tab.id === saved.activeId
+      )
+        ? saved.activeId
+        : restoredTabs[0].id
+
+      setTabs(restoredTabs)
+      setActiveId(restoredActiveId)
+      setBookmarks(saved.bookmarks)
+      setAddress(
+        restoredTabs.find((tab) => tab.id === restoredActiveId)?.url ?? ''
+      )
+
+      setWorkspaceLoaded(true)
+
+      for (const tab of restoredTabs) {
+        if (tab.url) {
+          void window.jayxBrowser.navigate(tab.url, String(tab.id))
+        }
+      }
+
+      await window.jayxBrowser.activateTab(String(restoredActiveId))
+
+      const activeTab = restoredTabs.find(
+        (tab) => tab.id === restoredActiveId
+      )
+
+      if (!activeTab?.url) {
+        await window.jayxBrowser.hidePage(String(restoredActiveId))
+      }
+    } catch (error) {
+      console.error('Failed to restore JayX workspace:', error)
+
+      if (!cancelled) {
+        setNotice('Could not restore the saved workspace.')
+        setWorkspaceLoaded(true)
+      }
+    }
+  }
+
+  void restoreWorkspace()
+
+  return () => {
+    cancelled = true
+  }
+}, [])
+
+useEffect(() => {
+  if (!workspaceLoaded) return
+
+  const workspace: WorkspaceState = {
+    tabs,
+    activeId,
+    bookmarks,
+  }
+
+  const timeoutId = window.setTimeout(() => {
+    void window.jayxBrowser.saveWorkspace(workspace).catch((error) => {
+      console.error('Failed to save JayX workspace:', error)
+      setNotice('Could not save the workspace.')
+    })
+  }, 500)
+
+  return () => window.clearTimeout(timeoutId)
+}, [tabs, activeId, bookmarks, workspaceLoaded])
+
   async function addTab() {
     const id = nextTabIdRef.current
     nextTabIdRef.current += 1
@@ -127,40 +222,49 @@ function App() {
     await window.jayxBrowser.activateTab(String(id))
   }
 
-  async function closeTab(id: number) {
-    await window.jayxBrowser.hidePage(String(id))
+  
+async function closeTab(id: number) {
+  const tabToClose = tabs.find((tab) => tab.id === id)
+  if (!tabToClose) return
 
-    if (tabs.length === 1) {
-      setTabs([{ id, title: 'New Tab', url: '' }])
-      setActiveId(id)
-      setAddress('')
-      setCanGoBack(false)
-      setCanGoForward(false)
-      setIsLoading(false)
-      setNotice('Your browser workspace is ready.')
-      await window.jayxBrowser.activateTab(String(id))
-      return
-    }
+  const remaining = tabs.filter((tab) => tab.id !== id)
 
-    const remaining = tabs.filter((tab) => tab.id !== id)
-    setTabs(remaining)
+  // Release the Chromium resources for this tab.
+  await window.jayxBrowser.closeTab(String(id))
 
-    if (activeId === id) {
-      const nextTab = remaining[remaining.length - 1]
+  if (remaining.length === 0) {
+    // Keep one empty UI tab available after the last tab is closed.
+    setTabs([{ id, title: 'New Tab', url: '' }])
+    setActiveId(id)
+    setAddress('')
+    setCanGoBack(false)
+    setCanGoForward(false)
+    setIsLoading(false)
+    setNotice('Your browser workspace is ready.')
 
-      setActiveId(nextTab.id)
-      setAddress(nextTab.url)
-      setCanGoBack(false)
-      setCanGoForward(false)
-      setIsLoading(false)
+    await window.jayxBrowser.activateTab(String(id))
+    return
+  }
 
-      await window.jayxBrowser.activateTab(String(nextTab.id))
+  setTabs(remaining)
 
-      if (!nextTab.url) {
-        await window.jayxBrowser.hidePage(String(nextTab.id))
-      }
+  if (activeId === id) {
+    const nextTab = remaining[remaining.length - 1]
+
+    setActiveId(nextTab.id)
+    setAddress(nextTab.url)
+    setCanGoBack(false)
+    setCanGoForward(false)
+    setIsLoading(false)
+
+    await window.jayxBrowser.activateTab(String(nextTab.id))
+
+    if (!nextTab.url) {
+      await window.jayxBrowser.hidePage(String(nextTab.id))
     }
   }
+}
+
 
   async function navigate(
     input: string,

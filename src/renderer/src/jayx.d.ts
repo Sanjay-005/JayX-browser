@@ -4,6 +4,18 @@ export {}
 declare global {
   interface Window {
     jayxBrowser: {
+      loadWorkspace: () => Promise<{
+        tabs: { id: number; title: string; url: string }[]
+        activeId: number
+        bookmarks: { id: string; title: string; url: string }[]
+     }>
+
+      saveWorkspace: (state: {
+        tabs: { id: number; title: string; url: string }[]
+        activeId: number
+        bookmarks: { id: string; title: string; url: string }[]
+      }) => Promise<{ ok: boolean }>
+
       navigate: (
         input: string,
         tabId?: string,
@@ -13,6 +25,7 @@ declare global {
       >
 
       activateTab: (tabId: string) => Promise<void>
+      closeTab: (tabId: string) => Promise<void>
       back: (tabId?: string) => Promise<void>
       forward: (tabId?: string) => Promise<void>
       reload: (tabId?: string) => Promise<void>

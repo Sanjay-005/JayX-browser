@@ -1,4 +1,4 @@
-
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { app, BrowserWindow, ipcMain, shell, WebContentsView } from 'electron'
 import { join } from 'node:path'
 
@@ -193,6 +193,109 @@ function createWindow(): void {
   })
 }
 
+
+type SavedTab = {
+  id: number
+  title: string
+  url: string
+}
+
+type SavedBookmark = {
+  id: string
+  title: string
+  url: string
+}
+
+type WorkspaceState = {
+  tabs: SavedTab[]
+  activeId: number
+  bookmarks: SavedBookmark[]
+}
+
+const defaultWorkspace: WorkspaceState = {
+  tabs: [{ id: 1, title: 'New Tab', url: '' }],
+  activeId: 1,
+  bookmarks: [],
+}
+
+const workspaceFile = () =>
+  join(app.getPath('userData'), 'workspace.json')
+
+async function loadWorkspace(): Promise<WorkspaceState> {
+  try {
+    const data = await readFile(workspaceFile(), 'utf8')
+    const parsed: unknown = JSON.parse(data)
+
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      !('tabs' in parsed) ||
+      !Array.isArray(parsed.tabs) ||
+      !('bookmarks' in parsed) ||
+      !Array.isArray(parsed.bookmarks) ||
+      !('activeId' in parsed) ||
+      typeof parsed.activeId !== 'number'
+    ) {
+      return defaultWorkspace
+    }
+
+    const tabs = parsed.tabs.filter(
+      (tab): tab is SavedTab =>
+        typeof tab === 'object' &&
+        tab !== null &&
+        'id' in tab &&
+        typeof tab.id === 'number' &&
+        'title' in tab &&
+        typeof tab.title === 'string' &&
+        'url' in tab &&
+        typeof tab.url === 'string' &&
+        (tab.url === '' || isSafeWebUrl(tab.url)),
+    )
+
+    const bookmarks = parsed.bookmarks.filter(
+      (bookmark): bookmark is SavedBookmark =>
+        typeof bookmark === 'object' &&
+        bookmark !== null &&
+        'id' in bookmark &&
+        typeof bookmark.id === 'string' &&
+        'title' in bookmark &&
+        typeof bookmark.title === 'string' &&
+        'url' in bookmark &&
+        typeof bookmark.url === 'string' &&
+        isSafeWebUrl(bookmark.url),
+    )
+
+    const safeTabs = tabs.length > 0
+      ? tabs
+      : [{ id: 1, title: 'New Tab', url: '' }]
+
+    const activeId = safeTabs.some(
+      (tab) => tab.id === parsed.activeId,
+    )
+      ? parsed.activeId
+      : safeTabs[0].id
+
+    return { tabs: safeTabs, activeId, bookmarks }
+  } catch {
+    return defaultWorkspace
+  }
+}
+
+async function saveWorkspace(
+  state: WorkspaceState,
+): Promise<void> {
+  const directory = app.getPath('userData')
+
+  await mkdir(directory, { recursive: true })
+
+  await writeFile(
+    workspaceFile(),
+    JSON.stringify(state, null, 2),
+    'utf8',
+  )
+}
+
+
 ipcMain.handle(
   'jayx:navigate',
   async (event, payload: string | NavigationPayload) => {
@@ -225,10 +328,66 @@ ipcMain.handle(
   },
 )
 
+ipcMain.handle('jayx:load-workspace', async (event) => {
+  if (!isTrustedRenderer(event.sender)) {
+    throw new Error('Untrusted renderer.')
+  }
+
+  return loadWorkspace()
+})
+
+ipcMain.handle(
+  'jayx:save-workspace',
+  async (event, state: WorkspaceState) => {
+    if (!isTrustedRenderer(event.sender)) {
+      throw new Error('Untrusted renderer.')
+    }
+
+    if (
+      !state ||
+      !Array.isArray(state.tabs) ||
+      !Array.isArray(state.bookmarks) ||
+      typeof state.activeId !== 'number'
+    ) {
+      throw new Error('Invalid workspace data.')
+    }
+
+    await saveWorkspace(state)
+    return { ok: true }
+  },
+)
+
 ipcMain.handle('jayx:activate-tab', (event, tabId: string) => {
   if (!isTrustedRenderer(event.sender) || typeof tabId !== 'string') return
 
   activateTab(tabId)
+})
+
+
+ipcMain.handle('jayx:close-tab', (event, tabId: string) => {
+  if (!isTrustedRenderer(event.sender)) return
+  if (typeof tabId !== 'string' || !tabId) return
+
+  const view = browserViews.get(tabId)
+
+  if (view) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.contentView.removeChildView(view)
+    }
+
+    browserViews.delete(tabId)
+    tabUrls.delete(tabId)
+
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.close()
+    }
+  }
+
+  if (activeTabId === tabId) {
+    activeTabId = ''
+  }
+
+  updateViewBounds()
 })
 
 ipcMain.handle('jayx:back', (event, tabId?: string) => {
