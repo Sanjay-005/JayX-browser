@@ -43,6 +43,8 @@ function App() {
   const [activeId, setActiveId] = useState(1)
   const [address, setAddress] = useState('')
   const [showAI, setShowAI] = useState(false)
+  const [showBookmarks, setShowBookmarks] = useState(false)
+
   const [notice, setNotice] = useState(
     'Your browser workspace, ready to explore.',
   )
@@ -51,15 +53,20 @@ function App() {
   const [canGoForward, setCanGoForward] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
 
+  const [bookmarks, setBookmarks] = useState<SavedBookmark[]>([])
+  const [workspaceLoaded, setWorkspaceLoaded] = useState(false)
+
   const workspaceRef = useRef<HTMLDivElement>(null)
   const contentSlotRef = useRef<HTMLDivElement>(null)
   const nextTabIdRef = useRef(2)
 
-  const [bookmarks, setBookmarks] = useState<SavedBookmark[]>([])
-  const [workspaceLoaded, setWorkspaceLoaded] = useState(false)
-
   const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs[0]
 
+  const isCurrentPageBookmarked = bookmarks.some(
+    (bookmark) => bookmark.url === activeTab?.url && bookmark.url !== '',
+  )
+
+  // Keep the native Chromium view aligned with the React workspace.
   useEffect(() => {
     const updateBounds = () => {
       const slot = contentSlotRef.current
@@ -119,87 +126,94 @@ function App() {
       unsubscribeNavigation()
       unsubscribeResize()
     }
-  }, [activeId, activeTab.url, showAI])
+  }, [activeId, activeTab.url, showAI, showBookmarks])
 
+  // Restore saved tabs and bookmarks when JayX starts.
   useEffect(() => {
-  let cancelled = false
+    let cancelled = false
 
-  const restoreWorkspace = async () => {
-    try {
-      const saved = await window.jayxBrowser.loadWorkspace()
+    const restoreWorkspace = async () => {
+      try {
+        const saved = await window.jayxBrowser.loadWorkspace()
 
-      if (cancelled) return
+        if (cancelled) return
 
-      const restoredTabs =
-        saved.tabs.length > 0
-          ? saved.tabs
-          : [{ id: 1, title: 'New Tab', url: '' }]
+        const restoredTabs =
+          saved.tabs.length > 0
+            ? saved.tabs
+            : [{ id: 1, title: 'New Tab', url: '' }]
 
-      const restoredActiveId = restoredTabs.some(
-        (tab) => tab.id === saved.activeId
-      )
-        ? saved.activeId
-        : restoredTabs[0].id
+        const restoredActiveId = restoredTabs.some(
+          (tab) => tab.id === saved.activeId,
+        )
+          ? saved.activeId
+          : restoredTabs[0].id
 
-      setTabs(restoredTabs)
-      setActiveId(restoredActiveId)
-      setBookmarks(saved.bookmarks)
-      setAddress(
-        restoredTabs.find((tab) => tab.id === restoredActiveId)?.url ?? ''
-      )
+        setTabs(restoredTabs)
+        setActiveId(restoredActiveId)
+        setBookmarks(saved.bookmarks)
+        setAddress(
+          restoredTabs.find((tab) => tab.id === restoredActiveId)?.url ?? '',
+        )
 
-      setWorkspaceLoaded(true)
+        // Avoid reusing an ID that belongs to a restored tab.
+        nextTabIdRef.current =
+          Math.max(...restoredTabs.map((tab) => tab.id)) + 1
 
-      for (const tab of restoredTabs) {
-        if (tab.url) {
-          void window.jayxBrowser.navigate(tab.url, String(tab.id))
+        setWorkspaceLoaded(true)
+
+        // Reopen saved pages.
+        for (const tab of restoredTabs) {
+          if (tab.url) {
+            void window.jayxBrowser.navigate(tab.url, String(tab.id))
+          }
+        }
+
+        await window.jayxBrowser.activateTab(String(restoredActiveId))
+
+        const restoredActiveTab = restoredTabs.find(
+          (tab) => tab.id === restoredActiveId,
+        )
+
+        if (!restoredActiveTab?.url) {
+          await window.jayxBrowser.hidePage(String(restoredActiveId))
+        }
+      } catch (error) {
+        console.error('Failed to restore JayX workspace:', error)
+
+        if (!cancelled) {
+          setNotice('Could not restore the saved workspace.')
+          setWorkspaceLoaded(true)
         }
       }
-
-      await window.jayxBrowser.activateTab(String(restoredActiveId))
-
-      const activeTab = restoredTabs.find(
-        (tab) => tab.id === restoredActiveId
-      )
-
-      if (!activeTab?.url) {
-        await window.jayxBrowser.hidePage(String(restoredActiveId))
-      }
-    } catch (error) {
-      console.error('Failed to restore JayX workspace:', error)
-
-      if (!cancelled) {
-        setNotice('Could not restore the saved workspace.')
-        setWorkspaceLoaded(true)
-      }
     }
-  }
 
-  void restoreWorkspace()
+    void restoreWorkspace()
 
-  return () => {
-    cancelled = true
-  }
-}, [])
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
-useEffect(() => {
-  if (!workspaceLoaded) return
+  // Persist changes after the user finishes making them.
+  useEffect(() => {
+    if (!workspaceLoaded) return
 
-  const workspace: WorkspaceState = {
-    tabs,
-    activeId,
-    bookmarks,
-  }
+    const workspace: WorkspaceState = {
+      tabs,
+      activeId,
+      bookmarks,
+    }
 
-  const timeoutId = window.setTimeout(() => {
-    void window.jayxBrowser.saveWorkspace(workspace).catch((error) => {
-      console.error('Failed to save JayX workspace:', error)
-      setNotice('Could not save the workspace.')
-    })
-  }, 500)
+    const timeoutId = window.setTimeout(() => {
+      void window.jayxBrowser.saveWorkspace(workspace).catch((error) => {
+        console.error('Failed to save JayX workspace:', error)
+        setNotice('Could not save the workspace.')
+      })
+    }, 500)
 
-  return () => window.clearTimeout(timeoutId)
-}, [tabs, activeId, bookmarks, workspaceLoaded])
+    return () => window.clearTimeout(timeoutId)
+  }, [tabs, activeId, bookmarks, workspaceLoaded])
 
   async function addTab() {
     const id = nextTabIdRef.current
@@ -222,54 +236,49 @@ useEffect(() => {
     await window.jayxBrowser.activateTab(String(id))
   }
 
-  
-async function closeTab(id: number) {
-  const tabToClose = tabs.find((tab) => tab.id === id)
-  if (!tabToClose) return
+  async function closeTab(id: number) {
+    const tabToClose = tabs.find((tab) => tab.id === id)
+    if (!tabToClose) return
 
-  const remaining = tabs.filter((tab) => tab.id !== id)
+    const remaining = tabs.filter((tab) => tab.id !== id)
 
-  // Release the Chromium resources for this tab.
-  await window.jayxBrowser.closeTab(String(id))
+    // Release the Chromium resources for this tab.
+    await window.jayxBrowser.closeTab(String(id))
 
-  if (remaining.length === 0) {
-    // Keep one empty UI tab available after the last tab is closed.
-    setTabs([{ id, title: 'New Tab', url: '' }])
-    setActiveId(id)
-    setAddress('')
-    setCanGoBack(false)
-    setCanGoForward(false)
-    setIsLoading(false)
-    setNotice('Your browser workspace is ready.')
+    if (remaining.length === 0) {
+      // Keep one empty UI tab available after the last tab is closed.
+      setTabs([{ id, title: 'New Tab', url: '' }])
+      setActiveId(id)
+      setAddress('')
+      setCanGoBack(false)
+      setCanGoForward(false)
+      setIsLoading(false)
+      setNotice('Your browser workspace is ready.')
 
-    await window.jayxBrowser.activateTab(String(id))
-    return
-  }
+      await window.jayxBrowser.activateTab(String(id))
+      return
+    }
 
-  setTabs(remaining)
+    setTabs(remaining)
 
-  if (activeId === id) {
-    const nextTab = remaining[remaining.length - 1]
+    if (activeId === id) {
+      const nextTab = remaining[remaining.length - 1]
 
-    setActiveId(nextTab.id)
-    setAddress(nextTab.url)
-    setCanGoBack(false)
-    setCanGoForward(false)
-    setIsLoading(false)
+      setActiveId(nextTab.id)
+      setAddress(nextTab.url)
+      setCanGoBack(false)
+      setCanGoForward(false)
+      setIsLoading(false)
 
-    await window.jayxBrowser.activateTab(String(nextTab.id))
+      await window.jayxBrowser.activateTab(String(nextTab.id))
 
-    if (!nextTab.url) {
-      await window.jayxBrowser.hidePage(String(nextTab.id))
+      if (!nextTab.url) {
+        await window.jayxBrowser.hidePage(String(nextTab.id))
+      }
     }
   }
-}
 
-
-  async function navigate(
-    input: string,
-    tabId: number = activeId,
-  ) {
+  async function navigate(input: string, tabId: number = activeId) {
     const trimmedInput = input.trim()
 
     if (!trimmedInput) return
@@ -287,11 +296,9 @@ async function closeTab(id: number) {
         String(tabId),
       )
 
-      if (!result.ok) {
-        if (tabId === activeId) {
-          setNotice(result.error)
-          setIsLoading(false)
-        }
+      if (!result.ok && tabId === activeId) {
+        setNotice(result.error)
+        setIsLoading(false)
       }
     } catch (error) {
       if (tabId === activeId) {
@@ -345,6 +352,42 @@ async function closeTab(id: number) {
     )
 
     await window.jayxBrowser.hidePage(String(activeId))
+  }
+
+  // Add or remove the active page from bookmarks.
+  function toggleBookmark() {
+    if (!activeTab?.url) {
+      setNotice('Navigate to a page before bookmarking it.')
+      return
+    }
+
+    if (isCurrentPageBookmarked) {
+      setBookmarks((current) =>
+        current.filter((bookmark) => bookmark.url !== activeTab.url),
+      )
+      setNotice('Bookmark removed.')
+      return
+    }
+
+    const bookmark: SavedBookmark = {
+      id: crypto.randomUUID(),
+      title: activeTab.title || activeTab.url,
+      url: activeTab.url,
+    }
+
+    setBookmarks((current) => [...current, bookmark])
+    setNotice('Page bookmarked successfully.')
+  }
+
+  function openBookmark(bookmark: SavedBookmark) {
+    setShowBookmarks(false)
+    void navigate(bookmark.url)
+  }
+
+  function removeBookmark(id: string) {
+    setBookmarks((current) =>
+      current.filter((bookmark) => bookmark.id !== id),
+    )
   }
 
   return (
@@ -413,9 +456,7 @@ async function closeTab(id: number) {
 
           <button
             className="icon-button"
-            onClick={() =>
-              void window.jayxBrowser.forward(String(activeId))
-            }
+            onClick={() => void window.jayxBrowser.forward(String(activeId))}
             disabled={!canGoForward}
             title="Forward"
           >
@@ -424,9 +465,7 @@ async function closeTab(id: number) {
 
           <button
             className="icon-button"
-            onClick={() =>
-              void window.jayxBrowser.reload(String(activeId))
-            }
+            onClick={() => void window.jayxBrowser.reload(String(activeId))}
             title="Reload"
           >
             ↻
@@ -438,6 +477,35 @@ async function closeTab(id: number) {
             title="Home"
           >
             ⌂
+          </button>
+
+          <button
+            type="button"
+            className="toolbar-button"
+            onClick={toggleBookmark}
+            disabled={!activeTab?.url}
+            title={
+              isCurrentPageBookmarked
+                ? 'Remove bookmark'
+                : 'Bookmark this page'
+            }
+            aria-label={
+              isCurrentPageBookmarked
+                ? 'Remove bookmark'
+                : 'Bookmark this page'
+            }
+          >
+            {isCurrentPageBookmarked ? '★' : '☆'}
+          </button>
+
+          <button
+            type="button"
+            className="toolbar-button"
+            onClick={() => setShowBookmarks((current) => !current)}
+            title="Show bookmarks"
+            aria-label="Show bookmarks"
+          >
+            Bookmarks ({bookmarks.length})
           </button>
         </div>
 
@@ -452,11 +520,7 @@ async function closeTab(id: number) {
             spellCheck={false}
           />
 
-          <button
-            className="address-submit"
-            type="submit"
-            title="Go"
-          >
+          <button className="address-submit" type="submit" title="Go">
             ↵
           </button>
         </form>
@@ -468,6 +532,58 @@ async function closeTab(id: number) {
           <span>✳</span> JayX AI
         </button>
       </div>
+
+      {/* Bookmarks panel */}
+      {showBookmarks && (
+        <section className="bookmarks-panel">
+          <div className="bookmarks-panel-header">
+            <h3>Saved bookmarks</h3>
+
+            <button
+              type="button"
+              className="toolbar-button"
+              onClick={() => setShowBookmarks(false)}
+              aria-label="Close bookmarks"
+            >
+              ×
+            </button>
+          </div>
+
+          {bookmarks.length === 0 ? (
+            <p className="bookmarks-empty">
+              No bookmarks yet. Open a website and click ☆ to save it.
+            </p>
+          ) : (
+            <div className="bookmarks-list">
+              {bookmarks.map((bookmark) => (
+                <div className="bookmark-item" key={bookmark.id}>
+                  <button
+                    type="button"
+                    className="bookmark-open"
+                    onClick={() => openBookmark(bookmark)}
+                    title={bookmark.url}
+                  >
+                    <span className="bookmark-title">
+                      {bookmark.title}
+                    </span>
+                    <span className="bookmark-url">{bookmark.url}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="bookmark-remove"
+                    onClick={() => removeBookmark(bookmark.id)}
+                    aria-label={`Remove ${bookmark.title}`}
+                    title="Remove bookmark"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="workspace" ref={workspaceRef}>
         {activeTab.url ? (
